@@ -1,0 +1,16 @@
+{
+    "Author": "Le Vagabond",
+    "Name": "Aether Radar",
+    "InternalName": "aetherradar",
+    "AssemblyVersion": "0.0.0.1",
+    "Description": "Simple overlay showing nearby aether currents with distance and direction",
+    "ApplicableVersion": "any",
+    "RepoUrl": "https://github.com/Le-Vagabond-gh/ffxiv_aetherradar",
+    "DalamudApiLevel": 14,
+    "LoadRequiredState": 0,
+    "LoadSync": false,
+    "CanUnloadAsync": false,
+    "LoadPriority": 0,
+    "Punchline": "Never miss an aether current again!",
+    "AcceptsFeedback": true
+}

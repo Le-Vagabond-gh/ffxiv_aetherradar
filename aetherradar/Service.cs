@@ -1,6 +1,8 @@
 using Dalamud.IoC;
 using Dalamud.Plugin.Services;
 
+#pragma warning disable Dalamud001 // IUnlockState is experimental but needed for checking collected currents
+
 namespace aetherradar
 {
     internal class Service
@@ -16,3 +18,5 @@ namespace aetherradar
         [PluginService] public static IUnlockState UnlockState { get; private set; } = null!;
     }
 }
+
+#pragma warning restore Dalamud001

@@ -8,15 +8,17 @@ namespace aetherradar
     public class ConfigWindow : Window, IDisposable
     {
         private Configuration Configuration;
+        private Plugin Plugin;
 
         public ConfigWindow(Plugin plugin) : base(
             "Aether Radar Settings",
             ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.NoScrollbar |
             ImGuiWindowFlags.NoScrollWithMouse)
         {
-            this.Size = new Vector2(300, 430);
+            this.Size = new Vector2(300, 460);
             this.SizeCondition = ImGuiCond.Always;
             this.Configuration = plugin.Configuration;
+            this.Plugin = plugin;
         }
 
         public void Dispose() { }
@@ -87,6 +89,27 @@ namespace aetherradar
             {
                 this.Configuration.ShowMapCoords = showMapCoords;
                 this.Configuration.Save();
+            }
+
+            var showStaticMapMarkers = this.Configuration.ShowStaticMapMarkers;
+            if (ImGui.Checkbox("Show Static Map Markers", ref showStaticMapMarkers))
+            {
+                this.Configuration.ShowStaticMapMarkers = showStaticMapMarkers;
+                this.Configuration.Save();
+            }
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip("Show all known aether current locations on the map for the current zone");
+            }
+
+            ImGui.SameLine();
+            if (ImGui.Button($"Icon##{this.Configuration.MapMarkerIconId}"))
+            {
+                this.Plugin.OpenIconPicker();
+            }
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip($"Current icon: {this.Configuration.MapMarkerIconId}\nClick to change");
             }
 
             ImGui.Spacing();

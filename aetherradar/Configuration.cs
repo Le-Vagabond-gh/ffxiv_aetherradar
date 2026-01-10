@@ -20,6 +20,8 @@ namespace aetherradar
         public float MaxDisplayDistance { get; set; } = 200f;
         public bool ShowCollected { get; set; } = false;
         public bool DebugLogging { get; set; } = false;
+        public bool ShowStaticMapMarkers { get; set; } = true;
+        public uint MapMarkerIconId { get; set; } = 60448;
 
         [NonSerialized]
         private IDalamudPluginInterface? PluginInterface;

@@ -5,10 +5,14 @@ using Dalamud.Plugin.Services;
 using Dalamud.Game.ClientState.Objects.Enums;
 using Dalamud.Bindings.ImGui;
 using Lumina.Excel.Sheets;
+using FFXIVClientStructs.FFXIV.Client.UI.Agent;
+using FFXIVClientStructs.FFXIV.Component.GUI;
+using Dalamud.Game.Text.SeStringHandling.Payloads;
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
+using System.Text;
 
 namespace aetherradar
 {
@@ -22,6 +26,7 @@ namespace aetherradar
         public Configuration Configuration { get; init; }
         public WindowSystem WindowSystem = new("AetherRadar");
         private ConfigWindow ConfigWindow { get; init; }
+        private IconPickerWindow IconPickerWindow { get; init; }
 
         // Aether current names in all supported languages
         private static readonly HashSet<string> AetherCurrentNames = new(StringComparer.OrdinalIgnoreCase)
@@ -36,6 +41,14 @@ namespace aetherradar
         private Dictionary<uint, AetherCurrent> aetherCurrentsById = new();
         // Cache EObj DataId -> AetherCurrent mapping (built from EObj sheet)
         private Dictionary<uint, AetherCurrent> aetherCurrentsByEObjId = new();
+
+        // Map marker tracking
+        private string lastZoneName = "";
+        private uint lastMapId = 0;
+        private bool wasMapOpen = false;
+        private int framesSinceMapOpened = 0;
+        private const int FrameDelayBeforeAdding = 30;
+        private const int MaxFramesToRetry = 120;
 
         public Plugin(
             IDalamudPluginInterface pluginInterface,
@@ -52,7 +65,9 @@ namespace aetherradar
             BuildAetherCurrentCache();
 
             ConfigWindow = new ConfigWindow(this);
+            IconPickerWindow = new IconPickerWindow(this.Configuration, this);
             WindowSystem.AddWindow(ConfigWindow);
+            WindowSystem.AddWindow(IconPickerWindow);
 
             this.CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
             {
@@ -62,7 +77,155 @@ namespace aetherradar
             this.PluginInterface.UiBuilder.OpenConfigUi += DrawConfigUI;
             this.PluginInterface.UiBuilder.Draw += DrawUI;
 
+            // Hook for map markers
+            Service.Framework.Update += OnFrameworkUpdate;
+            Service.ClientState.TerritoryChanged += OnTerritoryChanged;
+
             Service.PluginLog.Info("Aether Radar initialized");
+        }
+
+        private void OnTerritoryChanged(ushort territoryId)
+        {
+            framesSinceMapOpened = 0;
+        }
+
+        private void OnFrameworkUpdate(IFramework framework)
+        {
+            if (!Configuration.Enabled || !Configuration.ShowStaticMapMarkers)
+                return;
+
+            if (Service.ClientState.LocalPlayer == null)
+                return;
+
+            UpdateMapMarkers();
+        }
+
+        private unsafe void UpdateMapMarkers()
+        {
+            var agentMap = AgentMap.Instance();
+            if (agentMap == null)
+                return;
+
+            
+            // Get current zone info
+            var territoryId = Service.ClientState.TerritoryType;
+            var zoneName = GetCurrentZoneName();
+            var mapId = agentMap->CurrentMapId;
+
+            // Check if map is open
+            nint areaMapAddr = Service.GameGui.GetAddonByName("AreaMap");
+            bool isMapOpen = false;
+            if (areaMapAddr != nint.Zero)
+            {
+                var areaMap = (AtkUnitBase*)areaMapAddr;
+                isMapOpen = areaMap->IsVisible;
+            }
+
+            // Reset when map closes
+            if (!isMapOpen)
+            {
+                if (wasMapOpen)
+                {
+                    framesSinceMapOpened = 0;
+                    if (Configuration.DebugLogging)
+                        Service.PluginLog.Debug("Map closed");
+                }
+                wasMapOpen = false;
+                return;
+            }
+
+            // Map just opened
+            if (!wasMapOpen)
+            {
+                framesSinceMapOpened = 0;
+                if (Configuration.DebugLogging)
+                    Service.PluginLog.Debug("Map opened");
+            }
+            wasMapOpen = true;
+            framesSinceMapOpened++;
+
+            // Only add markers once when map opens
+            if (framesSinceMapOpened != 1)
+                return;
+
+            // Check if zone changed
+            if (zoneName != lastZoneName || mapId != lastMapId)
+            {
+                lastZoneName = zoneName;
+                lastMapId = mapId;
+            }
+
+            // Get aether currents for this zone
+            var currents = AetherCurrentData.GetFieldCurrents(zoneName);
+            if (currents == null || currents.Count == 0)
+                return;
+
+            // Get map info for coordinate conversion
+            var territorySheet = Service.DataManager.GetExcelSheet<TerritoryType>();
+            var territory = territorySheet?.GetRow(territoryId);
+            if (territory == null)
+                return;
+
+            var map = territory.Value.Map.Value;
+            var sizeFactor = map.SizeFactor / 100.0f;
+            var offsetX = map.OffsetX;
+            var offsetY = map.OffsetY;
+
+            // Reset markers, let game recreate its markers, then add ours
+            agentMap->ResetMapMarkers();
+            agentMap->CreateMapMarkers(true);
+
+            // Now add our markers on top
+            uint iconId = Configuration.MapMarkerIconId;
+            int added = 0;
+            var tooltipBytes = Encoding.UTF8.GetBytes("Aether Current\0");
+            fixed (byte* tooltipPtr = tooltipBytes)
+            {
+                foreach (var current in currents)
+                {
+                    var worldPos = MapToWorld(current.X, current.Y, sizeFactor, offsetX, offsetY);
+                    if (agentMap->AddMapMarker(worldPos, iconId, 0, tooltipPtr, 3, 0))
+                        added++;
+                }
+            }
+
+            if (Configuration.DebugLogging)
+                Service.PluginLog.Debug($"Added {added}/{currents.Count} map markers for zone: {zoneName}");
+        }
+
+        private string GetCurrentZoneName()
+        {
+            try
+            {
+                var territoryId = Service.ClientState.TerritoryType;
+                var territorySheet = Service.DataManager.GetExcelSheet<TerritoryType>();
+                var territory = territorySheet?.GetRow(territoryId);
+
+                if (territory != null)
+                {
+                    var placeName = territory.Value.PlaceName.Value;
+                    return placeName.Name.ExtractText();
+                }
+            }
+            catch (Exception ex)
+            {
+                if (Configuration.DebugLogging)
+                    Service.PluginLog.Error(ex, "Failed to get zone name");
+            }
+
+            return "";
+        }
+
+        private Vector3 MapToWorld(float mapX, float mapY, float sizeFactor, int offsetX, int offsetY)
+        {
+            // Inverse of the WorldToMap formula:
+            // mapX = (worldX - offsetX) * sizeFactor / 50.0f + 21.5f
+            // Solving for worldX:
+            // worldX = (mapX - 21.5f) * 50.0f / sizeFactor + offsetX
+            var worldX = (mapX - 21.5f) * 50.0f / sizeFactor + offsetX;
+            var worldZ = (mapY - 21.5f) * 50.0f / sizeFactor + offsetY;
+
+            return new Vector3(worldX, 0, worldZ);
         }
 
         // Track which DataIds we've already logged (to avoid spam)
@@ -159,6 +322,16 @@ namespace aetherradar
         public void DrawConfigUI()
         {
             ConfigWindow.IsOpen = true;
+        }
+
+        public void OpenIconPicker()
+        {
+            IconPickerWindow.IsOpen = true;
+        }
+
+        public void RefreshMapMarkers()
+        {
+            framesSinceMapOpened = 0;
         }
 
         public void DrawUI()
@@ -477,8 +650,11 @@ namespace aetherradar
 
         public void Dispose()
         {
+            Service.Framework.Update -= OnFrameworkUpdate;
+            Service.ClientState.TerritoryChanged -= OnTerritoryChanged;
             this.WindowSystem.RemoveAllWindows();
             ConfigWindow.Dispose();
+            IconPickerWindow.Dispose();
             this.CommandManager.RemoveHandler(CommandName);
             this.PluginInterface.UiBuilder.OpenConfigUi -= DrawConfigUI;
             this.PluginInterface.UiBuilder.Draw -= DrawUI;

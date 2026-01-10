@@ -10,7 +10,7 @@ namespace aetherradar
         public int Version { get; set; } = 0;
 
         public bool Enabled { get; set; } = true;
-        public bool ShowList { get; set; } = true;
+        public bool ShowList { get; set; } = false;
         public bool ShowMarkers { get; set; } = true;
         public bool ShowOffscreenIndicators { get; set; } = true;
         public bool LockListPosition { get; set; } = false;
@@ -21,7 +21,7 @@ namespace aetherradar
         public bool ShowCollected { get; set; } = false;
         public bool DebugLogging { get; set; } = false;
         public bool ShowStaticMapMarkers { get; set; } = true;
-        public uint MapMarkerIconId { get; set; } = 60448;
+        public uint MapMarkerIconId { get; set; } = 60408;
 
         [NonSerialized]
         private IDalamudPluginInterface? PluginInterface;

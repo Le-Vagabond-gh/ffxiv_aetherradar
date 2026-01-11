@@ -1,6 +1,8 @@
 ## Aether Radar
 
-A simple overlay that shows nearby aether currents with distance, direction, and off-screen indicators.
+A simple overlay that shows nearby aether currents with distance, direction, off-screen indicators, and static map markers for all known aether current locations.
+
+![Map Markers](map_marker.jpg)
 
 **Author:** Le Vagabond
 
@@ -13,7 +15,7 @@ A simple overlay that shows nearby aether currents with distance, direction, and
 - Moveable list window with lock option
 - Color-coded by distance (green = close, yellow = medium, white = far)
 - Map coordinates display
-- Static map markers showing all known aether current locations for the current zone (coordinates from [Eorzea World](https://eorzea-world.com/en/list/aether_current))
+- Static map markers showing all known aether current locations for the current zone (coordinates from [Eorzea World](https://eorzeaworld.com/en/aethercurrents))
 - Customizable map marker icon via built-in icon picker
 - Works in all supported languages (EN/JP/DE/FR)
 

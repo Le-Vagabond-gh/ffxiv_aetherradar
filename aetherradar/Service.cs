@@ -16,6 +16,7 @@ namespace aetherradar
         [PluginService] public static IPluginLog PluginLog { get; private set; } = null!;
         [PluginService] public static IDataManager DataManager { get; private set; } = null!;
         [PluginService] public static IUnlockState UnlockState { get; private set; } = null!;
+        [PluginService] public static IAddonLifecycle AddonLifecycle { get; private set; } = null!;
     }
 }
 

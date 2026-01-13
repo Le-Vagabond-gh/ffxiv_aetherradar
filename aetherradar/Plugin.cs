@@ -1,4 +1,5 @@
 using Dalamud.Game.Command;
+using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Interface.Windowing;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
@@ -45,10 +46,8 @@ namespace aetherradar
         // Map marker tracking
         private string lastZoneName = "";
         private uint lastMapId = 0;
-        private bool wasMapOpen = false;
-        private int framesSinceMapOpened = 0;
-        private const int FrameDelayBeforeAdding = 30;
-        private const int MaxFramesToRetry = 120;
+        private bool markersAddedForCurrentMap = false;
+        private bool wasMapVisible = false;
 
         public Plugin(
             IDalamudPluginInterface pluginInterface,
@@ -86,16 +85,53 @@ namespace aetherradar
 
         private void OnTerritoryChanged(ushort territoryId)
         {
-            framesSinceMapOpened = 0;
+            // Reset tracking when zone changes so markers will be added for new zone
+            markersAddedForCurrentMap = false;
+            wasMapVisible = false;
+            lastMapId = 0;
+            lastZoneName = "";
         }
 
-        private void OnFrameworkUpdate(IFramework framework)
+        private unsafe void OnFrameworkUpdate(IFramework framework)
         {
             if (!Configuration.Enabled || !Configuration.ShowStaticMapMarkers)
                 return;
 
             if (Service.ClientState.LocalPlayer == null)
                 return;
+
+            // Skip during quest events/cutscenes when player control is taken away
+            if (Service.Condition[ConditionFlag.OccupiedInQuestEvent] ||
+                Service.Condition[ConditionFlag.OccupiedInEvent] ||
+                Service.Condition[ConditionFlag.WatchingCutscene] ||
+                Service.Condition[ConditionFlag.OccupiedInCutSceneEvent])
+                return;
+
+            // Check if map is visible
+            nint areaMapAddr = Service.GameGui.GetAddonByName("AreaMap");
+            if (areaMapAddr == nint.Zero)
+            {
+                wasMapVisible = false;
+                return;
+            }
+
+            var areaMap = (AtkUnitBase*)areaMapAddr;
+            bool isVisible = areaMap->IsVisible;
+
+            if (!isVisible)
+            {
+                wasMapVisible = false;
+                return;
+            }
+
+            // Map just became visible - reset flag to allow marker addition
+            if (!wasMapVisible)
+            {
+                markersAddedForCurrentMap = false;
+                if (Configuration.DebugLogging)
+                    Service.PluginLog.Debug("Map became visible, reset marker tracking");
+            }
+            wasMapVisible = true;
 
             UpdateMapMarkers();
         }
@@ -106,53 +142,18 @@ namespace aetherradar
             if (agentMap == null)
                 return;
 
-            
             // Get current zone info
             var territoryId = Service.ClientState.TerritoryType;
             var zoneName = GetCurrentZoneName();
             var mapId = agentMap->CurrentMapId;
 
-            // Check if map is open
-            nint areaMapAddr = Service.GameGui.GetAddonByName("AreaMap");
-            bool isMapOpen = false;
-            if (areaMapAddr != nint.Zero)
+            // Safety check: skip if we already added markers for this exact map
+            // This prevents re-triggering during map visibility flickers (e.g., quest updates)
+            if (zoneName == lastZoneName && mapId == lastMapId && markersAddedForCurrentMap)
             {
-                var areaMap = (AtkUnitBase*)areaMapAddr;
-                isMapOpen = areaMap->IsVisible;
-            }
-
-            // Reset when map closes
-            if (!isMapOpen)
-            {
-                if (wasMapOpen)
-                {
-                    framesSinceMapOpened = 0;
-                    if (Configuration.DebugLogging)
-                        Service.PluginLog.Debug("Map closed");
-                }
-                wasMapOpen = false;
-                return;
-            }
-
-            // Map just opened
-            if (!wasMapOpen)
-            {
-                framesSinceMapOpened = 0;
                 if (Configuration.DebugLogging)
-                    Service.PluginLog.Debug("Map opened");
-            }
-            wasMapOpen = true;
-            framesSinceMapOpened++;
-
-            // Only add markers once when map opens
-            if (framesSinceMapOpened != 1)
+                    Service.PluginLog.Debug("Skipping marker update - already added for this map");
                 return;
-
-            // Check if zone changed
-            if (zoneName != lastZoneName || mapId != lastMapId)
-            {
-                lastZoneName = zoneName;
-                lastMapId = mapId;
             }
 
             // Get aether currents for this zone
@@ -171,6 +172,9 @@ namespace aetherradar
             var offsetX = map.OffsetX;
             var offsetY = map.OffsetY;
 
+            if (Configuration.DebugLogging)
+                Service.PluginLog.Debug($"Updating map markers for zone: {zoneName}, mapId: {mapId}");
+
             // Reset markers, let game recreate its markers, then add ours
             agentMap->ResetMapMarkers();
             agentMap->CreateMapMarkers(true);
@@ -188,6 +192,11 @@ namespace aetherradar
                         added++;
                 }
             }
+
+            // Track that we've added markers for this map
+            lastZoneName = zoneName;
+            lastMapId = mapId;
+            markersAddedForCurrentMap = true;
 
             if (Configuration.DebugLogging)
                 Service.PluginLog.Debug($"Added {added}/{currents.Count} map markers for zone: {zoneName}");
@@ -331,7 +340,8 @@ namespace aetherradar
 
         public void RefreshMapMarkers()
         {
-            framesSinceMapOpened = 0;
+            // Reset tracking so markers will be re-added on next map refresh
+            markersAddedForCurrentMap = false;
         }
 
         public void DrawUI()

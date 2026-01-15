@@ -48,6 +48,8 @@ namespace aetherradar
         private uint lastMapId = 0;
         private bool markersAddedForCurrentMap = false;
         private bool wasMapVisible = false;
+        private int mapVisibleFrameCount = 0;
+        private const int MapStabilityFrames = 30; // Wait ~0.5 seconds at 60fps before adding markers
 
         public Plugin(
             IDalamudPluginInterface pluginInterface,
@@ -88,6 +90,7 @@ namespace aetherradar
             // Reset tracking when zone changes so markers will be added for new zone
             markersAddedForCurrentMap = false;
             wasMapVisible = false;
+            mapVisibleFrameCount = 0;
             lastMapId = 0;
             lastZoneName = "";
         }
@@ -100,106 +103,159 @@ namespace aetherradar
             if (Service.ClientState.LocalPlayer == null)
                 return;
 
+            // Check map visibility FIRST to track state changes even during conditions
+            nint areaMapAddr = Service.GameGui.GetAddonByName("AreaMap");
+            bool isMapCurrentlyVisible = false;
+
+            if (areaMapAddr != nint.Zero)
+            {
+                var areaMap = (AtkUnitBase*)areaMapAddr;
+                isMapCurrentlyVisible = areaMap->IsVisible;
+            }
+
+            // Track map visibility state changes
+            if (!isMapCurrentlyVisible)
+            {
+                if (wasMapVisible)
+                {
+                    // Map just became hidden - reset tracking
+                    markersAddedForCurrentMap = false;
+                    mapVisibleFrameCount = 0;
+                    if (Configuration.DebugLogging)
+                        Service.PluginLog.Debug("Map became hidden, reset marker tracking");
+                }
+                wasMapVisible = false;
+                return;
+            }
+
+            // Map is visible - track how long it's been visible
+            if (!wasMapVisible)
+            {
+                // Map just became visible - start counting frames
+                mapVisibleFrameCount = 0;
+                if (Configuration.DebugLogging)
+                    Service.PluginLog.Debug("Map became visible, starting stability countdown");
+            }
+            wasMapVisible = true;
+            mapVisibleFrameCount++;
+
             // Skip during quest events/cutscenes when player control is taken away
+            // Also skip during transitions and when UI elements have focus to prevent crashes
             if (Service.Condition[ConditionFlag.OccupiedInQuestEvent] ||
                 Service.Condition[ConditionFlag.OccupiedInEvent] ||
                 Service.Condition[ConditionFlag.WatchingCutscene] ||
-                Service.Condition[ConditionFlag.OccupiedInCutSceneEvent])
-                return;
-
-            // Check if map is visible
-            nint areaMapAddr = Service.GameGui.GetAddonByName("AreaMap");
-            if (areaMapAddr == nint.Zero)
+                Service.Condition[ConditionFlag.WatchingCutscene78] ||
+                Service.Condition[ConditionFlag.OccupiedInCutSceneEvent] ||
+                Service.Condition[ConditionFlag.BetweenAreas] ||
+                Service.Condition[ConditionFlag.BetweenAreas51] ||
+                Service.Condition[ConditionFlag.Occupied] ||
+                Service.Condition[ConditionFlag.Occupied30] ||
+                Service.Condition[ConditionFlag.Occupied33] ||
+                Service.Condition[ConditionFlag.Occupied38] ||
+                Service.Condition[ConditionFlag.Occupied39])
             {
-                wasMapVisible = false;
-                return;
-            }
-
-            var areaMap = (AtkUnitBase*)areaMapAddr;
-            bool isVisible = areaMap->IsVisible;
-
-            if (!isVisible)
-            {
-                wasMapVisible = false;
+                // Reset frame counter during conditions - we'll wait again after they clear
+                mapVisibleFrameCount = 0;
                 return;
             }
 
-            // Map just became visible - reset flag to allow marker addition
-            if (!wasMapVisible)
+            // Wait for map to be stable for N frames before adding markers
+            if (mapVisibleFrameCount < MapStabilityFrames)
             {
-                markersAddedForCurrentMap = false;
-                if (Configuration.DebugLogging)
-                    Service.PluginLog.Debug("Map became visible, reset marker tracking");
+                if (Configuration.DebugLogging && mapVisibleFrameCount == 1)
+                    Service.PluginLog.Debug($"Waiting for map stability ({MapStabilityFrames} frames)...");
+                return;
             }
-            wasMapVisible = true;
 
             UpdateMapMarkers();
         }
 
         private unsafe void UpdateMapMarkers()
         {
-            var agentMap = AgentMap.Instance();
-            if (agentMap == null)
-                return;
-
-            // Get current zone info
-            var territoryId = Service.ClientState.TerritoryType;
-            var zoneName = GetCurrentZoneName();
-            var mapId = agentMap->CurrentMapId;
-
-            // Safety check: skip if we already added markers for this exact map
-            // This prevents re-triggering during map visibility flickers (e.g., quest updates)
-            if (zoneName == lastZoneName && mapId == lastMapId && markersAddedForCurrentMap)
+            try
             {
-                if (Configuration.DebugLogging)
-                    Service.PluginLog.Debug("Skipping marker update - already added for this map");
-                return;
-            }
+                var agentMap = AgentMap.Instance();
+                if (agentMap == null)
+                    return;
 
-            // Get aether currents for this zone
-            var currents = AetherCurrentData.GetFieldCurrents(zoneName);
-            if (currents == null || currents.Count == 0)
-                return;
+                // Re-verify map is still visible right before manipulation
+                nint areaMapAddr = Service.GameGui.GetAddonByName("AreaMap");
+                if (areaMapAddr == nint.Zero)
+                    return;
 
-            // Get map info for coordinate conversion
-            var territorySheet = Service.DataManager.GetExcelSheet<TerritoryType>();
-            var territory = territorySheet?.GetRow(territoryId);
-            if (territory == null)
-                return;
+                var areaMap = (AtkUnitBase*)areaMapAddr;
+                if (!areaMap->IsVisible)
+                    return;
 
-            var map = territory.Value.Map.Value;
-            var sizeFactor = map.SizeFactor / 100.0f;
-            var offsetX = map.OffsetX;
-            var offsetY = map.OffsetY;
+                // Get current zone info
+                var territoryId = Service.ClientState.TerritoryType;
+                var zoneName = GetCurrentZoneName();
+                var mapId = agentMap->CurrentMapId;
 
-            if (Configuration.DebugLogging)
-                Service.PluginLog.Debug($"Updating map markers for zone: {zoneName}, mapId: {mapId}");
-
-            // Reset markers, let game recreate its markers, then add ours
-            agentMap->ResetMapMarkers();
-            agentMap->CreateMapMarkers(true);
-
-            // Now add our markers on top
-            uint iconId = Configuration.MapMarkerIconId;
-            int added = 0;
-            var tooltipBytes = Encoding.UTF8.GetBytes("Aether Current\0");
-            fixed (byte* tooltipPtr = tooltipBytes)
-            {
-                foreach (var current in currents)
+                // Safety check: skip if we already added markers for this exact map
+                // This prevents re-triggering during map visibility flickers (e.g., quest updates)
+                if (zoneName == lastZoneName && mapId == lastMapId && markersAddedForCurrentMap)
                 {
-                    var worldPos = MapToWorld(current.X, current.Y, sizeFactor, offsetX, offsetY);
-                    if (agentMap->AddMapMarker(worldPos, iconId, 0, tooltipPtr, 3, 0))
-                        added++;
+                    if (Configuration.DebugLogging)
+                        Service.PluginLog.Debug("Skipping marker update - already added for this map");
+                    return;
                 }
+
+                // Get aether currents for this zone
+                var currents = AetherCurrentData.GetFieldCurrents(zoneName);
+                if (currents == null || currents.Count == 0)
+                    return;
+
+                // Get map info for coordinate conversion
+                var territorySheet = Service.DataManager.GetExcelSheet<TerritoryType>();
+                var territory = territorySheet?.GetRow(territoryId);
+                if (territory == null)
+                    return;
+
+                var map = territory.Value.Map.Value;
+                var sizeFactor = map.SizeFactor / 100.0f;
+                var offsetX = map.OffsetX;
+                var offsetY = map.OffsetY;
+
+                if (Configuration.DebugLogging)
+                    Service.PluginLog.Debug($"Updating map markers for zone: {zoneName}, mapId: {mapId}");
+
+                // Final safety check before modifying markers
+                if (!areaMap->IsVisible)
+                    return;
+
+                // Reset markers, let game recreate its markers, then add ours
+                agentMap->ResetMapMarkers();
+                agentMap->CreateMapMarkers(true);
+
+                // Now add our markers on top
+                uint iconId = Configuration.MapMarkerIconId;
+                int added = 0;
+                var tooltipBytes = Encoding.UTF8.GetBytes("Aether Current\0");
+                fixed (byte* tooltipPtr = tooltipBytes)
+                {
+                    foreach (var current in currents)
+                    {
+                        var worldPos = MapToWorld(current.X, current.Y, sizeFactor, offsetX, offsetY);
+                        if (agentMap->AddMapMarker(worldPos, iconId, 0, tooltipPtr, 3, 0))
+                            added++;
+                    }
+                }
+
+                // Track that we've added markers for this map
+                lastZoneName = zoneName;
+                lastMapId = mapId;
+                markersAddedForCurrentMap = true;
+
+                if (Configuration.DebugLogging)
+                    Service.PluginLog.Debug($"Added {added}/{currents.Count} map markers for zone: {zoneName}");
             }
-
-            // Track that we've added markers for this map
-            lastZoneName = zoneName;
-            lastMapId = mapId;
-            markersAddedForCurrentMap = true;
-
-            if (Configuration.DebugLogging)
-                Service.PluginLog.Debug($"Added {added}/{currents.Count} map markers for zone: {zoneName}");
+            catch (Exception ex)
+            {
+                // Map was likely closed/hidden during marker update - this is expected and safe to ignore
+                if (Configuration.DebugLogging)
+                    Service.PluginLog.Debug(ex, "Map marker update interrupted (map likely closed)");
+            }
         }
 
         private string GetCurrentZoneName()
@@ -406,10 +462,10 @@ namespace aetherradar
             if (Configuration.ShowList)
             {
                 var flags = ImGuiWindowFlags.AlwaysAutoResize |
-                           ImGuiWindowFlags.NoSavedSettings |
-                           ImGuiWindowFlags.NoFocusOnAppearing |
-                           ImGuiWindowFlags.NoBringToFrontOnFocus |
-                           ImGuiWindowFlags.NoCollapse;
+                            ImGuiWindowFlags.NoSavedSettings |
+                            ImGuiWindowFlags.NoFocusOnAppearing |
+                            ImGuiWindowFlags.NoBringToFrontOnFocus |
+                            ImGuiWindowFlags.NoCollapse;
 
                 if (Configuration.LockListPosition)
                 {

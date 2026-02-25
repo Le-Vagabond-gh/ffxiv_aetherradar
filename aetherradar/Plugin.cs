@@ -8,6 +8,8 @@ using Dalamud.Bindings.ImGui;
 using Lumina.Excel.Sheets;
 using FFXIVClientStructs.FFXIV.Client.UI.Agent;
 using FFXIVClientStructs.FFXIV.Component.GUI;
+using Dalamud.Game.Addon.Lifecycle;
+using Dalamud.Game.Addon.Lifecycle.AddonArgTypes;
 using Dalamud.Game.Text.SeStringHandling.Payloads;
 using System;
 using System.Collections.Generic;
@@ -43,13 +45,13 @@ namespace aetherradar
         // Cache EObj DataId -> AetherCurrent mapping (built from EObj sheet)
         private Dictionary<uint, AetherCurrent> aetherCurrentsByEObjId = new();
 
-        // Map marker tracking
-        private string lastZoneName = "";
-        private uint lastMapId = 0;
-        private bool markersAddedForCurrentMap = false;
-        private bool wasMapVisible = false;
-        private int mapVisibleFrameCount = 0;
-        private const int MapStabilityFrames = 30; // Wait ~0.5 seconds at 60fps before adding markers
+        // Map marker tracking - cached to avoid redundant lookups each frame
+        private string cachedZoneName = "";
+        private uint cachedMapId = 0;
+        private List<AetherCurrentData.AetherCurrentLocation>? cachedCurrents = null;
+        private float cachedSizeFactor = 0;
+        private int cachedOffsetX = 0;
+        private int cachedOffsetY = 0;
 
         public Plugin(
             IDalamudPluginInterface pluginInterface,
@@ -78,8 +80,9 @@ namespace aetherradar
             this.PluginInterface.UiBuilder.OpenConfigUi += DrawConfigUI;
             this.PluginInterface.UiBuilder.Draw += DrawUI;
 
-            // Hook for map markers
-            Service.Framework.Update += OnFrameworkUpdate;
+            // Hook for map markers - use AddonLifecycle to safely modify markers
+            // after the game finishes its own AreaMap update, avoiding race conditions
+            Service.AddonLifecycle.RegisterListener(AddonEvent.PostRequestedUpdate, "AreaMap", OnAreaMapPostUpdate);
             Service.ClientState.TerritoryChanged += OnTerritoryChanged;
 
             Service.PluginLog.Info("Aether Radar initialized");
@@ -87,174 +90,90 @@ namespace aetherradar
 
         private void OnTerritoryChanged(ushort territoryId)
         {
-            // Reset tracking when zone changes so markers will be added for new zone
-            markersAddedForCurrentMap = false;
-            wasMapVisible = false;
-            mapVisibleFrameCount = 0;
-            lastMapId = 0;
-            lastZoneName = "";
+            cachedZoneName = "";
+            cachedMapId = 0;
+            cachedCurrents = null;
         }
 
-        private unsafe void OnFrameworkUpdate(IFramework framework)
-        {
-            if (!Configuration.Enabled || !Configuration.ShowStaticMapMarkers)
-                return;
-
-            if (Service.ClientState.LocalPlayer == null)
-                return;
-
-            // Check map visibility FIRST to track state changes even during conditions
-            nint areaMapAddr = Service.GameGui.GetAddonByName("AreaMap");
-            bool isMapCurrentlyVisible = false;
-
-            if (areaMapAddr != nint.Zero)
-            {
-                var areaMap = (AtkUnitBase*)areaMapAddr;
-                isMapCurrentlyVisible = areaMap->IsVisible;
-            }
-
-            // Track map visibility state changes
-            if (!isMapCurrentlyVisible)
-            {
-                if (wasMapVisible)
-                {
-                    // Map just became hidden - reset tracking
-                    markersAddedForCurrentMap = false;
-                    mapVisibleFrameCount = 0;
-                    if (Configuration.DebugLogging)
-                        Service.PluginLog.Debug("Map became hidden, reset marker tracking");
-                }
-                wasMapVisible = false;
-                return;
-            }
-
-            // Map is visible - track how long it's been visible
-            if (!wasMapVisible)
-            {
-                // Map just became visible - start counting frames
-                mapVisibleFrameCount = 0;
-                if (Configuration.DebugLogging)
-                    Service.PluginLog.Debug("Map became visible, starting stability countdown");
-            }
-            wasMapVisible = true;
-            mapVisibleFrameCount++;
-
-            // Skip during quest events/cutscenes when player control is taken away
-            // Also skip during transitions and when UI elements have focus to prevent crashes
-            if (Service.Condition[ConditionFlag.OccupiedInQuestEvent] ||
-                Service.Condition[ConditionFlag.OccupiedInEvent] ||
-                Service.Condition[ConditionFlag.WatchingCutscene] ||
-                Service.Condition[ConditionFlag.WatchingCutscene78] ||
-                Service.Condition[ConditionFlag.OccupiedInCutSceneEvent] ||
-                Service.Condition[ConditionFlag.BetweenAreas] ||
-                Service.Condition[ConditionFlag.BetweenAreas51] ||
-                Service.Condition[ConditionFlag.Occupied] ||
-                Service.Condition[ConditionFlag.Occupied30] ||
-                Service.Condition[ConditionFlag.Occupied33] ||
-                Service.Condition[ConditionFlag.Occupied38] ||
-                Service.Condition[ConditionFlag.Occupied39])
-            {
-                // Reset frame counter during conditions - we'll wait again after they clear
-                mapVisibleFrameCount = 0;
-                return;
-            }
-
-            // Wait for map to be stable for N frames before adding markers
-            if (mapVisibleFrameCount < MapStabilityFrames)
-            {
-                if (Configuration.DebugLogging && mapVisibleFrameCount == 1)
-                    Service.PluginLog.Debug($"Waiting for map stability ({MapStabilityFrames} frames)...");
-                return;
-            }
-
-            UpdateMapMarkers();
-        }
-
-        private unsafe void UpdateMapMarkers()
+        /// <summary>
+        /// Called by AddonLifecycle after the game finishes its own AreaMap update.
+        /// The game's OnRequestedUpdate resets markers each time it runs, so we must
+        /// re-add ours after every update. This is safe because the game's update pass
+        /// is already complete - no race condition with stale node pointers.
+        /// </summary>
+        private unsafe void OnAreaMapPostUpdate(AddonEvent type, AddonArgs args)
         {
             try
             {
+                if (!Configuration.Enabled || !Configuration.ShowStaticMapMarkers)
+                    return;
+
+                if (Service.ClientState.LocalPlayer == null)
+                    return;
+
+                // Skip during transitions, cutscenes, etc.
+                if (Service.Condition[ConditionFlag.BetweenAreas] ||
+                    Service.Condition[ConditionFlag.BetweenAreas51] ||
+                    Service.Condition[ConditionFlag.WatchingCutscene] ||
+                    Service.Condition[ConditionFlag.WatchingCutscene78] ||
+                    Service.Condition[ConditionFlag.OccupiedInCutSceneEvent])
+                    return;
+
+                var addon = (AtkUnitBase*)args.Addon.Address;
+                if (addon == null || !addon->IsVisible)
+                    return;
+
                 var agentMap = AgentMap.Instance();
                 if (agentMap == null)
                     return;
 
-                // Re-verify map is still visible right before manipulation
-                nint areaMapAddr = Service.GameGui.GetAddonByName("AreaMap");
-                if (areaMapAddr == nint.Zero)
-                    return;
-
-                var areaMap = (AtkUnitBase*)areaMapAddr;
-                if (!areaMap->IsVisible)
-                    return;
-
-                // Get current zone info
+                // Refresh cached data when zone/map changes
                 var territoryId = Service.ClientState.TerritoryType;
-                var zoneName = GetCurrentZoneName();
                 var mapId = agentMap->CurrentMapId;
-
-                // Safety check: skip if we already added markers for this exact map
-                // This prevents re-triggering during map visibility flickers (e.g., quest updates)
-                if (zoneName == lastZoneName && mapId == lastMapId && markersAddedForCurrentMap)
+                if (mapId != cachedMapId || cachedCurrents == null)
                 {
+                    cachedMapId = mapId;
+                    cachedZoneName = GetCurrentZoneName();
+                    cachedCurrents = AetherCurrentData.GetFieldCurrents(cachedZoneName);
+
+                    var territorySheet = Service.DataManager.GetExcelSheet<TerritoryType>();
+                    var territory = territorySheet?.GetRow(territoryId);
+                    if (territory != null)
+                    {
+                        var map = territory.Value.Map.Value;
+                        cachedSizeFactor = map.SizeFactor / 100.0f;
+                        cachedOffsetX = map.OffsetX;
+                        cachedOffsetY = map.OffsetY;
+                    }
+
                     if (Configuration.DebugLogging)
-                        Service.PluginLog.Debug("Skipping marker update - already added for this map");
-                    return;
+                        Service.PluginLog.Debug($"Cached map data for zone: {cachedZoneName}, mapId: {mapId}");
                 }
 
-                // Get aether currents for this zone
-                var currents = AetherCurrentData.GetFieldCurrents(zoneName);
-                if (currents == null || currents.Count == 0)
+                if (cachedCurrents == null || cachedCurrents.Count == 0)
                     return;
 
-                // Get map info for coordinate conversion
-                var territorySheet = Service.DataManager.GetExcelSheet<TerritoryType>();
-                var territory = territorySheet?.GetRow(territoryId);
-                if (territory == null)
-                    return;
-
-                var map = territory.Value.Map.Value;
-                var sizeFactor = map.SizeFactor / 100.0f;
-                var offsetX = map.OffsetX;
-                var offsetY = map.OffsetY;
-
-                if (Configuration.DebugLogging)
-                    Service.PluginLog.Debug($"Updating map markers for zone: {zoneName}, mapId: {mapId}");
-
-                // Final safety check before modifying markers
-                if (!areaMap->IsVisible)
-                    return;
-
-                // Reset markers, let game recreate its markers, then add ours
+                // Reset and recreate game markers, then add ours on top.
+                // This must happen after the game's OnRequestedUpdate (guaranteed by
+                // PostRequestedUpdate timing) to avoid racing with the game's node reads.
                 agentMap->ResetMapMarkers();
                 agentMap->CreateMapMarkers(true);
 
-                // Now add our markers on top
                 uint iconId = Configuration.MapMarkerIconId;
-                int added = 0;
                 var tooltipBytes = Encoding.UTF8.GetBytes("Aether Current\0");
                 fixed (byte* tooltipPtr = tooltipBytes)
                 {
-                    foreach (var current in currents)
+                    foreach (var current in cachedCurrents)
                     {
-                        var worldPos = MapToWorld(current.X, current.Y, sizeFactor, offsetX, offsetY);
-                        if (agentMap->AddMapMarker(worldPos, iconId, 0, tooltipPtr, 3, 0))
-                            added++;
+                        var worldPos = MapToWorld(current.X, current.Y, cachedSizeFactor, cachedOffsetX, cachedOffsetY);
+                        agentMap->AddMapMarker(worldPos, iconId, 0, tooltipPtr, 3, 0);
                     }
                 }
-
-                // Track that we've added markers for this map
-                lastZoneName = zoneName;
-                lastMapId = mapId;
-                markersAddedForCurrentMap = true;
-
-                if (Configuration.DebugLogging)
-                    Service.PluginLog.Debug($"Added {added}/{currents.Count} map markers for zone: {zoneName}");
             }
             catch (Exception ex)
             {
-                // Map was likely closed/hidden during marker update - this is expected and safe to ignore
                 if (Configuration.DebugLogging)
-                    Service.PluginLog.Debug(ex, "Map marker update interrupted (map likely closed)");
+                    Service.PluginLog.Debug(ex, "Map marker update failed");
             }
         }
 
@@ -396,8 +315,9 @@ namespace aetherradar
 
         public void RefreshMapMarkers()
         {
-            // Reset tracking so markers will be re-added on next map refresh
-            markersAddedForCurrentMap = false;
+            // Invalidate cache so marker data is re-fetched on next update
+            cachedCurrents = null;
+            cachedMapId = 0;
         }
 
         public void DrawUI()
@@ -716,7 +636,7 @@ namespace aetherradar
 
         public void Dispose()
         {
-            Service.Framework.Update -= OnFrameworkUpdate;
+            Service.AddonLifecycle.UnregisterListener(AddonEvent.PostRequestedUpdate, "AreaMap", OnAreaMapPostUpdate);
             Service.ClientState.TerritoryChanged -= OnTerritoryChanged;
             this.WindowSystem.RemoveAllWindows();
             ConfigWindow.Dispose();

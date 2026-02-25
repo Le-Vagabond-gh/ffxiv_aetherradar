@@ -53,6 +53,12 @@ namespace aetherradar
         private int cachedOffsetX = 0;
         private int cachedOffsetY = 0;
 
+        // Cooldown after zone changes to let the game finish tearing down/rebuilding
+        // the AreaMap addon's node tree. ResetMapMarkers during this window leaves stale
+        // pointers that the game's next OnRequestedUpdate reads, causing an access violation.
+        private int zoneChangeCooldown = 0;
+        private const int ZoneChangeCooldownFrames = 120; // ~2 seconds at 60fps
+
         public Plugin(
             IDalamudPluginInterface pluginInterface,
             ICommandManager commandManager)
@@ -93,6 +99,7 @@ namespace aetherradar
             cachedZoneName = "";
             cachedMapId = 0;
             cachedCurrents = null;
+            zoneChangeCooldown = ZoneChangeCooldownFrames;
         }
 
         /// <summary>
@@ -108,6 +115,15 @@ namespace aetherradar
                 if (!Configuration.Enabled || !Configuration.ShowStaticMapMarkers)
                     return;
 
+                // Cooldown after zone changes - the game is still tearing down and
+                // rebuilding the AreaMap node tree. Calling ResetMapMarkers here would
+                // leave stale pointers for the game's next OnRequestedUpdate.
+                if (zoneChangeCooldown > 0)
+                {
+                    zoneChangeCooldown--;
+                    return;
+                }
+
                 if (Service.ClientState.LocalPlayer == null)
                     return;
 
@@ -117,7 +133,11 @@ namespace aetherradar
                     Service.Condition[ConditionFlag.WatchingCutscene] ||
                     Service.Condition[ConditionFlag.WatchingCutscene78] ||
                     Service.Condition[ConditionFlag.OccupiedInCutSceneEvent])
+                {
+                    // Reset cooldown if we hit a condition flag - the transition isn't done yet
+                    zoneChangeCooldown = ZoneChangeCooldownFrames;
                     return;
+                }
 
                 var addon = (AtkUnitBase*)args.Addon.Address;
                 if (addon == null || !addon->IsVisible)

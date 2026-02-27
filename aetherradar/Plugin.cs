@@ -53,11 +53,16 @@ namespace aetherradar
         private int cachedOffsetX = 0;
         private int cachedOffsetY = 0;
 
-        // Cooldown after zone changes to let the game finish tearing down/rebuilding
-        // the AreaMap addon's node tree. ResetMapMarkers during this window leaves stale
-        // pointers that the game's next OnRequestedUpdate reads, causing an access violation.
+        // After a zone change, the AreaMap addon tears down and rebuilds its node tree.
+        // Calling ResetMapMarkers before the rebuild is complete leaves stale pointers
+        // that the game's next OnRequestedUpdate reads, causing an access violation.
+        // We require the map ID to remain stable for several frames AND the addon to be
+        // fully loaded before touching markers.
         private int zoneChangeCooldown = 0;
-        private const int ZoneChangeCooldownFrames = 120; // ~2 seconds at 60fps
+        private const int ZoneChangeCooldownFrames = 30; // minimum cooldown after territory change
+        private uint lastSeenMapId = 0;
+        private int mapIdStableFrames = 0;
+        private const int RequiredStableFrames = 10; // map ID must be unchanged for this many frames
 
         public Plugin(
             IDalamudPluginInterface pluginInterface,
@@ -100,6 +105,8 @@ namespace aetherradar
             cachedMapId = 0;
             cachedCurrents = null;
             zoneChangeCooldown = ZoneChangeCooldownFrames;
+            lastSeenMapId = 0;
+            mapIdStableFrames = 0;
         }
 
         /// <summary>
@@ -115,9 +122,7 @@ namespace aetherradar
                 if (!Configuration.Enabled || !Configuration.ShowStaticMapMarkers)
                     return;
 
-                // Cooldown after zone changes - the game is still tearing down and
-                // rebuilding the AreaMap node tree. Calling ResetMapMarkers here would
-                // leave stale pointers for the game's next OnRequestedUpdate.
+                // Hard cooldown after zone changes
                 if (zoneChangeCooldown > 0)
                 {
                     zoneChangeCooldown--;
@@ -134,7 +139,6 @@ namespace aetherradar
                     Service.Condition[ConditionFlag.WatchingCutscene78] ||
                     Service.Condition[ConditionFlag.OccupiedInCutSceneEvent])
                 {
-                    // Reset cooldown if we hit a condition flag - the transition isn't done yet
                     zoneChangeCooldown = ZoneChangeCooldownFrames;
                     return;
                 }
@@ -143,13 +147,29 @@ namespace aetherradar
                 if (addon == null || !addon->IsVisible)
                     return;
 
+                // Verify the addon's node tree is fully loaded before touching markers.
+                // During zone transitions the ULD may still be loading - modifying markers
+                // in that state leaves stale pointers for the game's next OnRequestedUpdate.
+                if (addon->RootNode == null || addon->UldManager.LoadedState != AtkLoadState.Loaded)
+                    return;
+
                 var agentMap = AgentMap.Instance();
                 if (agentMap == null)
                     return;
 
-                // Refresh cached data when zone/map changes
+                // Wait for the map ID to stabilize - it can flicker during zone loads.
+                // Only proceed once it's been the same for several consecutive frames.
                 var territoryId = Service.ClientState.TerritoryType;
                 var mapId = agentMap->CurrentMapId;
+                if (mapId != lastSeenMapId)
+                {
+                    lastSeenMapId = mapId;
+                    mapIdStableFrames = 0;
+                    return;
+                }
+                mapIdStableFrames++;
+                if (mapIdStableFrames < RequiredStableFrames)
+                    return;
                 if (mapId != cachedMapId || cachedCurrents == null)
                 {
                     cachedMapId = mapId;

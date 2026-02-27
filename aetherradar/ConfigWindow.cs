@@ -15,7 +15,7 @@ namespace aetherradar
             ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.NoScrollbar |
             ImGuiWindowFlags.NoScrollWithMouse)
         {
-            this.Size = new Vector2(300, 460);
+            this.Size = new Vector2(300, 485);
             this.SizeCondition = ImGuiCond.Always;
             this.Configuration = plugin.Configuration;
             this.Plugin = plugin;
@@ -140,6 +140,13 @@ namespace aetherradar
             if (ImGui.Checkbox("Show Collected Currents", ref showCollected))
             {
                 this.Configuration.ShowCollected = showCollected;
+                this.Configuration.Save();
+            }
+
+            var checkForUpdates = this.Configuration.CheckForUpdates;
+            if (ImGui.Checkbox("Check for Updates", ref checkForUpdates))
+            {
+                this.Configuration.CheckForUpdates = checkForUpdates;
                 this.Configuration.Save();
             }
 

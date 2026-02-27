@@ -96,6 +96,9 @@ namespace aetherradar
             Service.AddonLifecycle.RegisterListener(AddonEvent.PostRequestedUpdate, "AreaMap", OnAreaMapPostUpdate);
             Service.ClientState.TerritoryChanged += OnTerritoryChanged;
 
+            if (Configuration.CheckForUpdates)
+                UpdateChecker.CheckForUpdate();
+
             Service.PluginLog.Info("Aether Radar initialized");
         }
 

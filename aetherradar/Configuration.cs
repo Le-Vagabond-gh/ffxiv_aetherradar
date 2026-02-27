@@ -22,6 +22,7 @@ namespace aetherradar
         public bool DebugLogging { get; set; } = false;
         public bool ShowStaticMapMarkers { get; set; } = true;
         public uint MapMarkerIconId { get; set; } = 60408;
+        public bool CheckForUpdates { get; set; } = true;
 
         [NonSerialized]
         private IDalamudPluginInterface? PluginInterface;

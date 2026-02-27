@@ -17,6 +17,8 @@ namespace aetherradar
         [PluginService] public static IDataManager DataManager { get; private set; } = null!;
         [PluginService] public static IUnlockState UnlockState { get; private set; } = null!;
         [PluginService] public static IAddonLifecycle AddonLifecycle { get; private set; } = null!;
+        [PluginService] public static IChatGui ChatGui { get; private set; } = null!;
+        [PluginService] public static INotificationManager NotificationManager { get; private set; } = null!;
     }
 }
 

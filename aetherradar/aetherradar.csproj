@@ -2,14 +2,22 @@
 <Project Sdk="Dalamud.NET.Sdk/14.0.1">
 
   <PropertyGroup>
-    <Version>0.0.0.1</Version>
+    <Version>1.1.0</Version>
     <TargetFramework>net10.0</TargetFramework>
     <Description>Simple aethercurrent radar overlay</Description>
     <PackageProjectUrl>https://github.com/Le-Vagabond-gh/ffxiv_aetherradar</PackageProjectUrl>
     <PackageLicenseExpression>AGPL-3.0-or-later</PackageLicenseExpression>
     <IsPackable>false</IsPackable>
     <Configurations>Debug;Release</Configurations>
+    <SourceRevisionId>local</SourceRevisionId>
   </PropertyGroup>
+
+  <!-- Embed git short hash into InformationalVersion at build time -->
+  <Target Name="SetGitHash" BeforeTargets="GetAssemblyVersion" Condition="Exists('$(ProjectDir)..\.git')">
+    <Exec Command="git -C &quot;$(ProjectDir)..&quot; rev-parse --short HEAD" ConsoleToMSBuild="true" StandardOutputImportance="low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="SourceRevisionId" />
+    </Exec>
+  </Target>
 
   <PropertyGroup Condition="'$(GITHUB_ACTIONS)' != 'true'">
     <OutputPath>E:\FINAL FANTASY XIV\plugins\aetherradar\</OutputPath>

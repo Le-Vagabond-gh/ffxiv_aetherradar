@@ -2,7 +2,7 @@
     "Author": "Le Vagabond",
     "Name": "Aether Radar",
     "InternalName": "aetherradar",
-    "AssemblyVersion": "1.1.0",
+    "AssemblyVersion": "1.1.1",
     "Description": "Simple overlay showing nearby aether currents with distance and direction",
     "ApplicableVersion": "any",
     "RepoUrl": "https://github.com/Le-Vagabond-gh/ffxiv_aetherradar",

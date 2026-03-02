@@ -1,16 +1,12 @@
 using Dalamud.Game.Command;
-using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Interface.Windowing;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
 using Dalamud.Game.ClientState.Objects.Enums;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Hooking;
 using Lumina.Excel.Sheets;
 using FFXIVClientStructs.FFXIV.Client.UI.Agent;
-using FFXIVClientStructs.FFXIV.Component.GUI;
-using Dalamud.Game.Addon.Lifecycle;
-using Dalamud.Game.Addon.Lifecycle.AddonArgTypes;
-using Dalamud.Game.Text.SeStringHandling.Payloads;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -47,22 +43,15 @@ namespace aetherradar
 
         // Map marker tracking - cached to avoid redundant lookups each frame
         private string cachedZoneName = "";
-        private uint cachedMapId = 0;
+        private uint cachedTerritoryId = 0;
         private List<AetherCurrentData.AetherCurrentLocation>? cachedCurrents = null;
         private float cachedSizeFactor = 0;
         private int cachedOffsetX = 0;
         private int cachedOffsetY = 0;
 
-        // After a zone change, the AreaMap addon tears down and rebuilds its node tree.
-        // Calling ResetMapMarkers before the rebuild is complete leaves stale pointers
-        // that the game's next OnRequestedUpdate reads, causing an access violation.
-        // We require the map ID to remain stable for several frames AND the addon to be
-        // fully loaded before touching markers.
-        private int zoneChangeCooldown = 0;
-        private const int ZoneChangeCooldownFrames = 30; // minimum cooldown after territory change
-        private uint lastSeenMapId = 0;
-        private int mapIdStableFrames = 0;
-        private const int RequiredStableFrames = 10; // map ID must be unchanged for this many frames
+        // Hook into the game's own CreateMapMarkers to add our markers inside
+        // the game's normal flow, avoiding timing issues that cause crashes.
+        private Hook<AgentMap.Delegates.CreateMapMarkers>? createMapMarkersHook;
 
         public Plugin(
             IDalamudPluginInterface pluginInterface,
@@ -91,9 +80,22 @@ namespace aetherradar
             this.PluginInterface.UiBuilder.OpenConfigUi += DrawConfigUI;
             this.PluginInterface.UiBuilder.Draw += DrawUI;
 
-            // Hook for map markers - use AddonLifecycle to safely modify markers
-            // after the game finishes its own AreaMap update, avoiding race conditions
-            Service.AddonLifecycle.RegisterListener(AddonEvent.PostRequestedUpdate, "AreaMap", OnAreaMapPostUpdate);
+            // Hook the game's CreateMapMarkers to inject our custom markers inside
+            // the game's own marker creation flow. This is how other plugins (VanillaPlus,
+            // SimpleMapTracker) safely add markers without causing crashes.
+            try
+            {
+                unsafe
+                {
+                    createMapMarkersHook = Service.GameInteropProvider.HookFromAddress<AgentMap.Delegates.CreateMapMarkers>(
+                        (nint)AgentMap.MemberFunctionPointers.CreateMapMarkers, CreateMapMarkersDetour);
+                }
+            }
+            catch (Exception ex)
+            {
+                Service.PluginLog.Error(ex, "Failed to hook CreateMapMarkers");
+            }
+            createMapMarkersHook.Enable();
             Service.ClientState.TerritoryChanged += OnTerritoryChanged;
 
             if (Configuration.CheckForUpdates)
@@ -105,78 +107,40 @@ namespace aetherradar
         private void OnTerritoryChanged(ushort territoryId)
         {
             cachedZoneName = "";
-            cachedMapId = 0;
+            cachedTerritoryId = 0;
             cachedCurrents = null;
-            zoneChangeCooldown = ZoneChangeCooldownFrames;
-            lastSeenMapId = 0;
-            mapIdStableFrames = 0;
         }
 
         /// <summary>
-        /// Called by AddonLifecycle after the game finishes its own AreaMap update.
-        /// The game's OnRequestedUpdate resets markers each time it runs, so we must
-        /// re-add ours after every update. This is safe because the game's update pass
-        /// is already complete - no race condition with stale node pointers.
+        /// Hooked into the game's own CreateMapMarkers function.
+        /// Calls the original first (game creates its markers), then adds our
+        /// custom aether current markers on top. This runs inside the game's
+        /// normal marker creation flow, avoiding the timing issues that caused
+        /// crashes with AddonLifecycle Pre/PostRequestedUpdate hooks.
         /// </summary>
-        private unsafe void OnAreaMapPostUpdate(AddonEvent type, AddonArgs args)
+        private unsafe void CreateMapMarkersDetour(AgentMap* agentMap, bool omitAetherytes)
         {
             try
             {
+                // Always call the original first
+                createMapMarkersHook!.Original(agentMap, omitAetherytes);
+
+                // The game calls CreateMapMarkers twice: once with true (omit aetherytes),
+                // once with false. Only add our markers on the second call (like VanillaPlus).
+                if (omitAetherytes) return;
+
                 if (!Configuration.Enabled || !Configuration.ShowStaticMapMarkers)
                     return;
 
-                // Hard cooldown after zone changes
-                if (zoneChangeCooldown > 0)
+                var territoryId = agentMap->SelectedTerritoryId;
+                if (territoryId == 0)
+                    return;
+
+                // Refresh cache if territory changed
+                if (territoryId != cachedTerritoryId || cachedCurrents == null)
                 {
-                    zoneChangeCooldown--;
-                    return;
-                }
-
-                if (Service.ClientState.LocalPlayer == null)
-                    return;
-
-                // Skip during transitions, cutscenes, etc.
-                if (Service.Condition[ConditionFlag.BetweenAreas] ||
-                    Service.Condition[ConditionFlag.BetweenAreas51] ||
-                    Service.Condition[ConditionFlag.WatchingCutscene] ||
-                    Service.Condition[ConditionFlag.WatchingCutscene78] ||
-                    Service.Condition[ConditionFlag.OccupiedInCutSceneEvent])
-                {
-                    zoneChangeCooldown = ZoneChangeCooldownFrames;
-                    return;
-                }
-
-                var addon = (AtkUnitBase*)args.Addon.Address;
-                if (addon == null || !addon->IsVisible)
-                    return;
-
-                // Verify the addon's node tree is fully loaded before touching markers.
-                // During zone transitions the ULD may still be loading - modifying markers
-                // in that state leaves stale pointers for the game's next OnRequestedUpdate.
-                if (addon->RootNode == null || addon->UldManager.LoadedState != AtkLoadState.Loaded)
-                    return;
-
-                var agentMap = AgentMap.Instance();
-                if (agentMap == null)
-                    return;
-
-                // Wait for the map ID to stabilize - it can flicker during zone loads.
-                // Only proceed once it's been the same for several consecutive frames.
-                var territoryId = Service.ClientState.TerritoryType;
-                var mapId = agentMap->CurrentMapId;
-                if (mapId != lastSeenMapId)
-                {
-                    lastSeenMapId = mapId;
-                    mapIdStableFrames = 0;
-                    return;
-                }
-                mapIdStableFrames++;
-                if (mapIdStableFrames < RequiredStableFrames)
-                    return;
-                if (mapId != cachedMapId || cachedCurrents == null)
-                {
-                    cachedMapId = mapId;
-                    cachedZoneName = GetCurrentZoneName();
+                    cachedTerritoryId = territoryId;
+                    cachedZoneName = GetZoneNameForTerritory(territoryId);
                     cachedCurrents = AetherCurrentData.GetFieldCurrents(cachedZoneName);
 
                     var territorySheet = Service.DataManager.GetExcelSheet<TerritoryType>();
@@ -190,17 +154,11 @@ namespace aetherradar
                     }
 
                     if (Configuration.DebugLogging)
-                        Service.PluginLog.Debug($"Cached map data for zone: {cachedZoneName}, mapId: {mapId}");
+                        Service.PluginLog.Debug($"Cached map data for zone: {cachedZoneName}, territory: {territoryId}");
                 }
 
                 if (cachedCurrents == null || cachedCurrents.Count == 0)
                     return;
-
-                // Reset and recreate game markers, then add ours on top.
-                // This must happen after the game's OnRequestedUpdate (guaranteed by
-                // PostRequestedUpdate timing) to avoid racing with the game's node reads.
-                agentMap->ResetMapMarkers();
-                agentMap->CreateMapMarkers(true);
 
                 uint iconId = Configuration.MapMarkerIconId;
                 var tooltipBytes = Encoding.UTF8.GetBytes("Aether Current\0");
@@ -216,15 +174,14 @@ namespace aetherradar
             catch (Exception ex)
             {
                 if (Configuration.DebugLogging)
-                    Service.PluginLog.Debug(ex, "Map marker update failed");
+                    Service.PluginLog.Debug(ex, "Map marker hook failed");
             }
         }
 
-        private string GetCurrentZoneName()
+        private string GetZoneNameForTerritory(uint territoryId)
         {
             try
             {
-                var territoryId = Service.ClientState.TerritoryType;
                 var territorySheet = Service.DataManager.GetExcelSheet<TerritoryType>();
                 var territory = territorySheet?.GetRow(territoryId);
 
@@ -360,7 +317,7 @@ namespace aetherradar
         {
             // Invalidate cache so marker data is re-fetched on next update
             cachedCurrents = null;
-            cachedMapId = 0;
+            cachedTerritoryId = 0;
         }
 
         public void DrawUI()
@@ -679,7 +636,7 @@ namespace aetherradar
 
         public void Dispose()
         {
-            Service.AddonLifecycle.UnregisterListener(AddonEvent.PostRequestedUpdate, "AreaMap", OnAreaMapPostUpdate);
+            createMapMarkersHook?.Dispose();
             Service.ClientState.TerritoryChanged -= OnTerritoryChanged;
             this.WindowSystem.RemoveAllWindows();
             ConfigWindow.Dispose();

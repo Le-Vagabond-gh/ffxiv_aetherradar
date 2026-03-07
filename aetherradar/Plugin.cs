@@ -11,6 +11,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace aetherradar
@@ -53,6 +54,10 @@ namespace aetherradar
         // the game's normal flow, avoiding timing issues that cause crashes.
         private Hook<AgentMap.Delegates.CreateMapMarkers>? createMapMarkersHook;
 
+        // Tooltip string allocated in unmanaged memory so the pointer stays valid
+        // after the hook returns. AddMapMarker stores the pointer, not a copy.
+        private nint tooltipPtr;
+
         public Plugin(
             IDalamudPluginInterface pluginInterface,
             ICommandManager commandManager)
@@ -63,6 +68,12 @@ namespace aetherradar
 
             this.Configuration = this.PluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
             this.Configuration.Initialize(this.PluginInterface);
+
+            // Allocate tooltip string in unmanaged memory - AddMapMarker stores the
+            // raw pointer (doesn't copy), so it must outlive the hook call.
+            var tooltipBytes = Encoding.UTF8.GetBytes("Aether Current\0");
+            tooltipPtr = Marshal.AllocHGlobal(tooltipBytes.Length);
+            Marshal.Copy(tooltipBytes, 0, tooltipPtr, tooltipBytes.Length);
 
             // Build aether current lookup
             BuildAetherCurrentCache();
@@ -95,7 +106,7 @@ namespace aetherradar
             {
                 Service.PluginLog.Error(ex, "Failed to hook CreateMapMarkers");
             }
-            createMapMarkersHook.Enable();
+            createMapMarkersHook?.Enable();
             Service.ClientState.TerritoryChanged += OnTerritoryChanged;
 
             if (Configuration.CheckForUpdates)
@@ -109,6 +120,9 @@ namespace aetherradar
             cachedZoneName = "";
             cachedTerritoryId = 0;
             cachedCurrents = null;
+            cachedSizeFactor = 0;
+            cachedOffsetX = 0;
+            cachedOffsetY = 0;
         }
 
         /// <summary>
@@ -160,15 +174,37 @@ namespace aetherradar
                 if (cachedCurrents == null || cachedCurrents.Count == 0)
                     return;
 
+                // Skip if map data is invalid (size factor 0 would cause division by zero -> NaN/Infinity positions)
+                if (cachedSizeFactor <= 0)
+                    return;
+
+                // The AreaMap addon pre-allocates a limited number of visual nodes for
+                // markers. The marker array holds 132, but the addon may have fewer nodes.
+                // Adding too many markers causes the game to access null nodes and crash
+                // (native access violation in AtkResNode.InitializeTimeline).
+                // Cap at 100 total to leave safe headroom for the addon's node pool.
+                const int safeMarkerLimit = 100;
+                if (agentMap->MapMarkerCount >= safeMarkerLimit)
+                    return;
+
+                var remainingSlots = safeMarkerLimit - agentMap->MapMarkerCount;
                 uint iconId = Configuration.MapMarkerIconId;
-                var tooltipBytes = Encoding.UTF8.GetBytes("Aether Current\0");
-                fixed (byte* tooltipPtr = tooltipBytes)
+                var tooltip = (byte*)tooltipPtr;
+                var added = 0;
+                foreach (var current in cachedCurrents)
                 {
-                    foreach (var current in cachedCurrents)
-                    {
-                        var worldPos = MapToWorld(current.X, current.Y, cachedSizeFactor, cachedOffsetX, cachedOffsetY);
-                        agentMap->AddMapMarker(worldPos, iconId, 0, tooltipPtr, 3, 0);
-                    }
+                    if (added >= remainingSlots)
+                        break;
+
+                    var worldPos = MapToWorld(current.X, current.Y, cachedSizeFactor, cachedOffsetX, cachedOffsetY);
+
+                    // Guard against invalid positions that would crash the game's renderer
+                    if (float.IsNaN(worldPos.X) || float.IsInfinity(worldPos.X) ||
+                        float.IsNaN(worldPos.Z) || float.IsInfinity(worldPos.Z))
+                        continue;
+
+                    if (agentMap->AddMapMarker(worldPos, iconId, 0, tooltip, 3, 0))
+                        added++;
                 }
             }
             catch (Exception ex)
@@ -638,6 +674,11 @@ namespace aetherradar
         {
             createMapMarkersHook?.Dispose();
             Service.ClientState.TerritoryChanged -= OnTerritoryChanged;
+            if (tooltipPtr != nint.Zero)
+            {
+                Marshal.FreeHGlobal(tooltipPtr);
+                tooltipPtr = nint.Zero;
+            }
             this.WindowSystem.RemoveAllWindows();
             ConfigWindow.Dispose();
             IconPickerWindow.Dispose();

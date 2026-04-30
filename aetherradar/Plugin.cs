@@ -115,7 +115,7 @@ namespace aetherradar
             Service.PluginLog.Info("Aether Radar initialized");
         }
 
-        private void OnTerritoryChanged(ushort territoryId)
+        private void OnTerritoryChanged(uint territoryId)
         {
             cachedZoneName = "";
             cachedTerritoryId = 0;
@@ -364,7 +364,7 @@ namespace aetherradar
                 return;
 
             // Only draw overlay when logged in
-            if (Service.ClientState.LocalPlayer == null)
+            if (Service.ObjectTable.LocalPlayer == null)
                 return;
 
             DrawAetherCurrentOverlay();
@@ -372,7 +372,7 @@ namespace aetherradar
 
         private void DrawAetherCurrentOverlay()
         {
-            var playerPos = Service.ClientState.LocalPlayer!.Position;
+            var playerPos = Service.ObjectTable.LocalPlayer!.Position;
             var aetherCurrents = new List<(string name, Vector3 pos, float distance, string direction, bool collected)>();
 
             // Scan for aether currents in the object table

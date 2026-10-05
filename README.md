@@ -20,28 +20,21 @@ A simple overlay that shows nearby aether currents with distance, direction, off
 - Works in all supported languages (EN/JP/DE/FR)
 
 ## Installation
+- Open the Dalamud Plugin Installer
+- Go to Settings
+- Head to the "Experimental" tab
+- Under "Custom Plugin Repositories", paste this URL and click the `+` button:
 
-1. Download `aetherradar.dll` and `aetherradar.json` from [Releases](https://github.com/Le-Vagabond-gh/ffxiv_aetherradar/releases) to the same folder
-2. Open the Dalamud Plugin Installer in-game
-3. Go to Settings
-4. Head to the "Experimental" tab
-5. Under "Dev Plugin Locations", click "Select dev plugin DLL"
-6. Select the `aetherradar.dll` you downloaded
-7. Press "Save and Close"
-8. In the main plugin installer window, enable the plugin under Dev Tools
+  ```
+  https://raw.githubusercontent.com/Le-Vagabond-gh/FFXIV_Dalamud_Repo/main/repo.json
+  ```
 
-## Why Install From Releases Instead of a Custom Repository?
+- Press "Save and Close"
+- Install "Aether Radar" from the main plugin installer window
 
-Adding custom plugin repositories to Dalamud is a security risk because repository maintainers can push updates at any time, and those updates are automatically installed. A compromised or malicious repository could push harmful code directly to your game client.
+Updates then arrive through the plugin installer like for any other plugin.
 
-**Installing from GitHub Releases is safer because:**
-
-- **Immutable releases enabled** - this repository has immutable releases turned on, meaning once published, the release files cannot be modified, replaced, or deleted
-- **You control updates** - new versions only install when you manually download them
-- **Full transparency** - you can inspect the exact code that built each release via the commit history and GitHub Actions logs
-- **No automatic execution** - malicious updates can't be silently pushed to your client
-
-This approach gives you the security of knowing exactly what code is running, while still benefiting from community-developed plugins.
+If you would rather control updates yourself, download `aetherradar-<version>-full.zip` from [Releases](https://github.com/Le-Vagabond-gh/ffxiv_aetherradar/releases) (releases are immutable, so a published build can never be swapped), extract it and add the extracted `aetherradar.dll` as a dev plugin location under the same "Experimental" tab.
 
 ## Usage
 
